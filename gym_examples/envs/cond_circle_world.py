@@ -4,36 +4,23 @@ import pygame
 import numpy as np
 
 
-class GridWorldEnv(gym.Env):
+class CondCircleEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 4}
 
-    def __init__(self, render_mode=None, size=5):
+    def __init__(self, render_mode=None, size=5, radius=1, in_out="in"):
         self.size = size  # The size of the square grid
         self.window_size = 512  # The size of the PyGame window
+        self.radius = radius
+        self.in_out = in_out
+        self.origin_coord = np.array([size/2, size/2])
 
         # Observations are dictionaries with the agent's and the target's location.
         # Each location is encoded as an element of {0, ..., `size`}^2, i.e. MultiDiscrete([size, size]).
-        self.observation_space = spaces.Dict(
-            {
-                "agent": spaces.Box(0, size - 1, shape=(2,), dtype=int),
-                "target": spaces.Box(0, size - 1, shape=(2,), dtype=int),
-            }
-        )
+        self.observation_space = spaces.Box(0, size, shape=(2,), dtype=float)
 
-        # We have 4 actions, corresponding to "right", "up", "left", "down", "right"
-        self.action_space = spaces.Discrete(4)
+        # x and y acceleration
+        self.action_space = spaces.Box(-0.1, 0.1, shape=(2,), dtype=float)
 
-        """
-        The following dictionary maps abstract actions from `self.action_space` to 
-        the direction we will walk in if that action is taken.
-        I.e. 0 corresponds to "right", 1 to "up" etc.
-        """
-        self._action_to_direction = {
-            0: np.array([1, 0]),
-            1: np.array([0, 1]),
-            2: np.array([-1, 0]),
-            3: np.array([0, -1]),
-        }
 
         assert render_mode is None or render_mode in self.metadata["render_modes"]
         self.render_mode = render_mode
@@ -49,12 +36,12 @@ class GridWorldEnv(gym.Env):
         self.clock = None
 
     def _get_obs(self):
-        return {"agent": self._agent_location, "target": self._target_location}
+        return self._agent_location
 
     def _get_info(self):
         return {
-            "distance": np.linalg.norm(
-                self._agent_location - self._target_location, ord=1
+            "distance_to_origin": np.sqrt(
+                np.sum((self._agent_location - self.origin_coord) ** 2)
             )
         }
 
@@ -63,14 +50,7 @@ class GridWorldEnv(gym.Env):
         super().reset(seed=seed)
 
         # Choose the agent's location uniformly at random
-        self._agent_location = self.np_random.integers(0, self.size, size=2, dtype=int)
-
-        # We will sample the target's location randomly until it does not coincide with the agent's location
-        self._target_location = self._agent_location
-        while np.array_equal(self._target_location, self._agent_location):
-            self._target_location = self.np_random.integers(
-                0, self.size, size=2, dtype=int
-            )
+        self._agent_location = self.origin_coord + np.random.uniform(-1.5, 1.5, (2,))
 
         observation = self._get_obs()
         info = self._get_info()
@@ -82,21 +62,33 @@ class GridWorldEnv(gym.Env):
 
     def step(self, action):
         # Map the action (element of {0,1,2,3}) to the direction we walk in
-        direction = self._action_to_direction[action]
+        speed = np.sqrt(np.sum(action ** 2))
+        direction = action / speed if speed > 0 else np.zeros_like(action)
         # We use `np.clip` to make sure we don't leave the grid
-        self._agent_location = np.clip(
-            self._agent_location + direction, 0, self.size - 1
-        )
+        velocity = np.clip(speed * direction, -0.1, 0.1)
+        self._agent_location = np.clip(self._agent_location + velocity, 0, self.size)
+
         # An episode is done iff the agent has reached the target
-        terminated = np.array_equal(self._agent_location, self._target_location)
-        reward = 1 if terminated else 0  # Binary sparse rewards
-        observation = self._get_obs()
+        terminated = False
         info = self._get_info()
+        distance = info["distance_to_origin"] 
+        is_in = distance <= self.radius
+            
+        reward = 0
+        if self.in_out == "in" and is_in:
+            reward = 1
+        elif self.in_out == "out" and not is_in:
+            reward = 1
+        observation = self._get_obs()
+
+        # reward += 0.01 * np.sqrt(np.sum(self._agent_velocity ** 2))
+        if distance >= 0.45 * self.size:
+            reward = 0
 
         if self.render_mode == "human":
             self._render_frame()
 
-        return observation, reward, terminated, False, info
+        return observation, reward, False, False, info
 
     def render(self):
         if self.render_mode == "rgb_array":
@@ -111,44 +103,19 @@ class GridWorldEnv(gym.Env):
             self.clock = pygame.time.Clock()
 
         canvas = pygame.Surface((self.window_size, self.window_size))
-        canvas.fill((255, 255, 255))
+        canvas.fill((255, 0, 255))
         pix_square_size = (
             self.window_size / self.size
         )  # The size of a single grid square in pixels
 
-        # First we draw the target
-        pygame.draw.rect(
-            canvas,
-            (255, 0, 0),
-            pygame.Rect(
-                pix_square_size * self._target_location,
-                (pix_square_size, pix_square_size),
-            ),
-        )
         # Now we draw the agent
+        center =  (self._agent_location + 0.5) * pix_square_size
         pygame.draw.circle(
             canvas,
             (0, 0, 255),
-            (self._agent_location + 0.5) * pix_square_size,
-            pix_square_size / 3,
+            center.flatten().tolist(),
+            pix_square_size / 5,
         )
-
-        # Finally, add some gridlines
-        for x in range(self.size + 1):
-            pygame.draw.line(
-                canvas,
-                0,
-                (0, pix_square_size * x),
-                (self.window_size, pix_square_size * x),
-                width=3,
-            )
-            pygame.draw.line(
-                canvas,
-                0,
-                (pix_square_size * x, 0),
-                (pix_square_size * x, self.window_size),
-                width=3,
-            )
 
         if self.render_mode == "human":
             # The following line copies our drawings from `canvas` to the visible window
